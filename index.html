@@ -1148,8 +1148,29 @@
     return a;
   }
 
+  /* Mezcla las opciones de una pregunta y recalcula cuál es la correcta,
+     para que la respuesta no caiga siempre en la misma letra. */
+  function mezclarOpciones(q){
+    const textoCorrecto = q.options[q.correct];
+    const opciones = shuffleArray(q.options);
+    return {
+      q: q.q,
+      options: opciones,
+      correct: opciones.indexOf(textoCorrecto),
+      explain: q.explain
+    };
+  }
+
   /* ============ STORAGE ============ */
   async function init(){
+    // Pedir al navegador que NO borre los datos automáticamente
+    try{
+      if(navigator.storage && navigator.storage.persist){
+        const yaPersistente = await navigator.storage.persisted();
+        if(!yaPersistente) await navigator.storage.persist();
+      }
+    }catch(e){ /* algunos navegadores no lo soportan; continúa igual */ }
+
     try{
       const res = await DB.get(LAST_USER_KEY, false);
       if(res && res.value){
@@ -1422,6 +1443,7 @@
       <button class="simulacro-launch" data-action="start-simulacro">📝 Simulacro general CACES (${totalQuestions} preguntas)</button>
       <button class="study-launch" data-action="open-study">📖 Explicaciones por tema</button>
       <button class="ranking-launch" data-action="show-ranking">🏆 Ver ranking de estudiantes</button>
+      <button class="study-launch" data-action="open-backup" style="margin-top:12px;">💾 Copia de seguridad</button>
       <div class="path-wrap" id="pathWrap"></div>
     `;
     screen.innerHTML = "";
@@ -1497,7 +1519,7 @@
   function startLesson(unitId, isPractice){
     const unit = getUnit(unitId);
     const pool = shuffleArray(unit.questions);
-    state.runQuestions = pool.slice(0, Math.min(QUESTIONS_PER_LESSON, pool.length));
+    state.runQuestions = pool.slice(0, Math.min(QUESTIONS_PER_LESSON, pool.length)).map(mezclarOpciones);
     state.currentUnitId = unitId;
     state.isPractice = isPractice;
     state.isSimulacro = false;
@@ -1515,7 +1537,7 @@
   function startSimulacro(){
     const allQuestions = [];
     UNITS.forEach(u => u.questions.forEach(q => allQuestions.push(q)));
-    state.runQuestions = shuffleArray(allQuestions); // el total de todas las preguntas creadas, mezcladas
+    state.runQuestions = shuffleArray(allQuestions).map(mezclarOpciones); // todas las preguntas, con opciones mezcladas
     state.currentUnitId = null;
     state.isPractice = false;
     state.isSimulacro = true;
@@ -1729,6 +1751,85 @@
     else if(state.screen==="results-fail") renderResultsFail();
     else if(state.screen==="ranking") renderRanking();
     else if(state.screen==="study") renderStudy();
+    else if(state.screen==="backup") renderBackup();
+  }
+
+  /* ============ COPIA DE SEGURIDAD ============ */
+  async function exportarDatos(){
+    try{
+      const datos = {app:"simulador-caces", fecha:new Date().toISOString(), registros:{}};
+      const propias = await DB.list("caces-enfermeria", false);
+      for(const k of (propias.keys||[])){
+        try{ const r = await DB.get(k,false); datos.registros[k] = {v:r.value, shared:false}; }catch(e){}
+      }
+      const rank = await DB.list("leaderboard:", true);
+      for(const k of (rank.keys||[])){
+        try{ const r = await DB.get(k,true); datos.registros[k] = {v:r.value, shared:true}; }catch(e){}
+      }
+      const blob = new Blob([JSON.stringify(datos,null,2)], {type:"application/json"});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = "respaldo-caces-" + new Date().toISOString().slice(0,10) + ".json";
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(()=>URL.revokeObjectURL(url), 1000);
+      showToast("Copia de seguridad descargada ✅");
+    }catch(e){ showToast("No se pudo crear la copia"); }
+  }
+
+  function importarDatos(){
+    const inp = document.createElement("input");
+    inp.type = "file"; inp.accept = "application/json,.json";
+    inp.addEventListener("change", async () => {
+      const f = inp.files && inp.files[0];
+      if(!f) return;
+      try{
+        const texto = await f.text();
+        const datos = JSON.parse(texto);
+        if(!datos || datos.app !== "simulador-caces" || !datos.registros){
+          showToast("El archivo no es un respaldo válido"); return;
+        }
+        let n = 0;
+        for(const k in datos.registros){
+          const item = datos.registros[k];
+          try{ await DB.set(k, item.v, !!item.shared); n++; }catch(e){}
+        }
+        showToast("Restaurados " + n + " registros ✅");
+        setTimeout(()=>{ location.reload(); }, 1200);
+      }catch(e){ showToast("No se pudo leer el archivo"); }
+    });
+    inp.click();
+  }
+
+  function renderBackup(){
+    const screen = $("#screen");
+    const wrap = el("div","study-wrap");
+    wrap.innerHTML = `
+      <button class="study-back" data-action="go-home">← Inicio</button>
+      <h2 class="study-title">💾 Copia de seguridad</h2>
+      <p class="study-sub">Tu progreso se guarda en este navegador. Descarga una copia para no perderlo si cambias de dispositivo o si el navegador borra los datos.</p>
+      <div class="study-card">
+        <p class="study-q">Descargar mi progreso</p>
+        <p class="study-explain">Guarda un archivo con tu usuario, XP, racha, unidades completadas y el ranking de este dispositivo.</p>
+        <button class="primary-btn continue" data-action="do-export" style="width:100%;margin-top:12px;">Descargar copia</button>
+      </div>
+      <div class="study-card">
+        <p class="study-q">Restaurar desde un archivo</p>
+        <p class="study-explain">Carga un archivo de respaldo descargado antes. Se sobrescribirán los datos que coincidan y la página se recargará.</p>
+        <button class="primary-btn check" data-action="do-import" style="width:100%;margin-top:12px;">Elegir archivo</button>
+      </div>
+      <div class="study-card">
+        <p class="study-q">Consejos para no perder tu avance</p>
+        <p class="study-explain">
+          • Entra siempre por la misma dirección web.<br>
+          • No uses modo incógnito.<br>
+          • Evita "borrar datos de navegación" del sitio.<br>
+          • Descarga una copia de vez en cuando.
+        </p>
+      </div>
+    `;
+    screen.innerHTML = "";
+    screen.appendChild(wrap);
   }
 
   /* ============ ESTUDIO / EXPLICACIONES ============ */
@@ -1759,7 +1860,7 @@
       `;
     } else {
       const unit = getUnit(state.studyUnitId);
-      const letters = ["A","B","C","D"];
+
       wrap.innerHTML = `
         <div style="display:flex;justify-content:space-between;align-items:center;">
           <button class="study-back" data-action="study-back">← Temas</button>
@@ -1771,7 +1872,7 @@
           <div class="study-card">
             <div class="study-q-num">Pregunta ${i+1}</div>
             <p class="study-q">${q.q}</p>
-            <div class="study-answer">✅ <span>${letters[q.correct]}) ${q.options[q.correct]}</span></div>
+            <div class="study-answer">✅ <span>${q.options[q.correct]}</span></div>
             <p class="study-explain">${q.explain}</p>
           </div>`).join("")}
         <button class="primary-btn" data-action="go-home" style="width:100%;margin-top:8px;background:transparent;color:var(--muted);border:1.5px solid #DCEEEA;">Volver al inicio</button>
@@ -1858,6 +1959,9 @@
       }
     }
     else if(action==="open-study") openStudy(null);
+    else if(action==="open-backup"){ state.screen="backup"; render(); }
+    else if(action==="do-export") exportarDatos();
+    else if(action==="do-import") importarDatos();
     else if(action==="study-unit") openStudy(parseInt(t.dataset.unitId,10));
     else if(action==="study-back") openStudy(null);
     else if(action==="study-current-unit") openStudy(state.currentUnitId);
